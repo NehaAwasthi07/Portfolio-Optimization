@@ -1,0 +1,196 @@
+---
+title: "Portfolio_Optimization"
+author: "Neha Awasthi"
+date: "2022-10-30"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Portfolio optimization is the process of selecting the best portfolio, out of the set of all feasible portfolios for our desired outcome. We typically maximize return and minimizes financial risk during the consideration.
+Sharpe Ratio is a measure of calculating risk adjusted return. Higher the Sharpe Ratio, more is the excess returns over that of a risk free investment, relative to the increased risk of the investment.
+
+In this project, we are going to use Monte-Carlo simulation method to optimize portfolios using R. We write a function that takes Tickers, beginning date, end date and risk-free rate as input and gives us a feasible set. We optimize it using weight simulation and find an efficient frontier and then try to find an optimal portfolio.
+
+Let's load all the libraries needed first
+
+```{r}
+library(quantmod)
+library(dplyr)
+library(ggplot2)
+```
+Let's write an R function that a vector of TICKERs, a begin date, an end date, (annualized) risk-free rate as arguments and produce an list containing the vector of stock means, the covariance matrix and  relevant information (weights, mean, sigma, SR) for each simulated portfolio.
+
+```{r}
+myMeanVarPort <- function(ticks,begin_date,end_date,rf_rate){
+  
+  #Create a portfolio for the required tickers and given dates
+  retout <- NULL
+  retout <- xts(retout)
+  
+  for(i in 1:length(ticks)){
+    prices = getSymbols(ticks[i], auto.assign = F)
+    returns <- periodReturn(prices, period = "monthly", 
+                          type = "arithmetic")
+    retout <- merge.xts(retout, returns)
+  }
+  
+  colnames(retout) <- ticks
+  dates <- paste(begin_date, end_date, sep='/')
+  retout = retout[dates]
+  
+  # Calculate mean
+  meanret <- colMeans(retout,na.rm = T)
+  
+  # Get Covariance matrix
+  covar <- var(retout)
+  
+  meanret <- as.matrix(meanret)
+  
+  # Simulate weights for the portfolios for 100N portfolios
+  set.seed(12)
+  niter <- 100*length(ticks)
+  randomnums <- data.frame(replicate(length(ticks), runif(niter, 1, 10)))
+  
+  wt_sim <- randomnums / rowSums(randomnums)
+  
+  ## initialize weight and Results matrices
+  weight <- matrix(data = NA, nrow = length(ticks), ncol = 1)
+
+  Results <- matrix(data = NA, nrow = niter, ncol = (length(ticks)+3))
+  
+  #run the simulations.
+  
+  # loop: each i is a portfolio
+  for (i in 1:niter){
+    # inner loop places weights into Results
+    for (k in 1:length(ticks)) {
+      Results[i,k] = weight[k,1] = wt_sim[i,k]
+    }
+    Results[i,length(ticks)+1] <- t(weight) %*% meanret                #portfolio mean
+    Results[i,length(ticks)+2] <- sqrt(t(weight) %*% covar %*% weight) #portfolio sigma
+    Results[i,length(ticks)+3] <- (Results[i,length(ticks)+1] - rf_rate)/Results[i,length(ticks)+2] #portfolio SR ratio
+  }
+  
+  #Calculate Portfolio Mean return, risk and Sharpe ratio
+  mretp <- t(weight) %*% meanret
+  sretp <- sqrt(t(weight) %*% covar %*% weight)
+  shrretp <- (mretp - rf_rate)/sretp
+  
+  # Store the output in the list containing the vector of stock means, the covariance matrix, weights, mean, sigma, SR for each simulated portfolio
+  out_lst <-list()
+  out_lst[["Stock_means"]] <- meanret
+  out_lst[["Covariance_Matrix"]] <- covar
+  out_lst[["Portfolio_Weight"]] <- weight
+  out_lst[["Portfolio_Mean"]] <- mretp
+  out_lst[["Portfolio_Sigma"]] <- sretp
+  out_lst[["Portfolio_Sharpe_ratio"]] <- shrretp
+  out_lst[["Results"]] <- Results
+  return(out_lst)
+}
+```
+## Show results for the given inputs
+
+```{r}
+ticks <- c('GE', 'XOM', 'GBX', 'SBUX', 'PFE', 'HMC', 'NVDA')
+begin_date <- 20140101
+end_date <- 20171231
+rf_rate <- 0.02
+
+output <- myMeanVarPort(ticks,begin_date,end_date,rf_rate)
+output
+```
+
+Let's check the data type of output of our function
+
+```{r}
+class(output)
+```
+Let's show the result as a data frame that includes portfolio mean, sigma and Sharpe ratio and the plot the feasible set
+
+```{r}
+Results <- output[["Results"]]
+colnames(Results) <- c(ticks, "PortMean", "PortSigma", "PortSharpeRatio")
+Results <- as.data.frame(Results)
+head(Results)
+```
+
+
+```{r}
+ggplot(data = Results , aes(x = PortSigma, y = PortMean, color = PortSharpeRatio)) +
+  geom_point(pch = 10, size =3)
+```
+Let's print the mean returns, sigma and sharpe ration for the portfolio
+
+```{r}
+weight<- output[["Portfolio_Weight"]]
+covar <- output[["Covariance_Matrix"]]
+meanret<- output[["Stock_means"]]
+mretp <- t(weight) %*% meanret
+sretp <- sqrt(t(weight) %*% covar %*% weight)
+shrretp <- (mretp - rf_rate)/sretp
+
+cat("The portfolio mean return, sigma and sharpe ratio: ", mretp, sretp,shrretp)
+```
+## Optimization
+
+We optimize the portfolios by maximizing sharpe ratio
+```{r}
+#Optimization 
+minmret = min(Results$PortMean)
+maxmret = max(Results$PortMean)
+seqmret = seq(round(minmret,3)-.001, maxmret+.001, .001)
+
+optim <- Results %>% mutate(portnumber = index(Results)) %>%
+  mutate(ints = cut(PortMean ,breaks = seqmret), 
+         lower = as.numeric( sub("\\((.+),.*", "\\1", ints) )) %>% 
+  group_by(ints) %>% 
+  summarise( lowerval = min(lower),
+             sig_optim = min(PortSigma),
+             ret_sigm_optim = PortMean[which.min(PortSigma)],
+             ret= PortMean,
+             retn_optim = PortMean[which.max(PortMean)],
+             sr_optim = PortSharpeRatio[which.max(PortSharpeRatio)],
+             numb = length(PortSigma), 
+             portID=portnumber[which.max(PortMean)])
+
+optim
+```
+
+## Plot the optimized potfolios
+```{r}
+xcoord_minvar <- min(optim$sig_optim)
+ycoord_minvar<- optim$ret[which.min(optim$sig_optim)]
+
+
+ggplot(data = optim , aes(x = sig_optim, y = retn_optim, color = sr_optim)) +
+  geom_point(pch = 10, size = 3) +
+  annotate("segment", x = xcoord_minvar, y = ycoord_minvar, 
+         xend = xcoord_minvar + .005, yend =ycoord_minvar ,
+         arrow=arrow(), color = "blue") +
+  annotate("text", x = .040, y = ycoord_minvar, label = 'Min Variance', color = 'red')+
+  annotate("segment", x = 0.0395, y = 0.018, 
+           xend = 0.0395+ .005, yend =0.018 ,
+           arrow=arrow(), color = "blue") +
+  annotate("text", x = .050, y = 0.018, label = 'Optimal Portfolio', color = 'red')
+```
+## Conclusion:
+
+Monte-Carlo Simulation is one of the methods typically used to optimize portfolios. There is however no one correct method or result as the paramters may differ and it involves some speculation. That said, let's looks at some advantages and disadvantages of this method:
+
+# Advantages:
+The biggest advantage of this method is its ability to factor in a range of values for various inputs converting chances into choices.
+It can also be easily plotted for visual aid.
+
+# Disadvantages:
+Since it depends on inputs it needs the assumptions to be fair
+Another disadvantage is that ot tends to underestimate the behaviorial aspect of finance and the irrationality demonstrated by participants.
+
+For all its pros and cons, Monte-Carlo simulation remains one of the most widely used methods in finance for optimization and is a useful tool for advisors.
